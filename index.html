@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8" />
+  <title>Mnemonic → Wallet Tree (Simulation)</title>
+
+  <style>
+    :root {
+      --bg:#0D3643; --surface:#123F4F; --text:#E6F1F3;
+      --muted:#9FB7BF; --accent:#F2A65A; --accent-hover:#FFB703;
+      --danger:#ff6b6b; --ok:#8ff0a4;
+    }
+    body {
+      margin:0;
+      min-height:100vh;
+      background:var(--bg);
+      color:var(--text);
+      font-family:system-ui,sans-serif;
+      display:flex;
+      justify-content:center;
+      align-items:flex-start;
+      padding:40px 12px;
+      box-sizing:border-box;
+    }
+    .app {
+      width:min(560px, 100%);
+      background:var(--surface);
+      border-radius:18px;
+      padding:24px;
+      box-shadow:0 20px 50px rgba(0,0,0,.4);
+    }
+    h2 { text-align:center; margin:0 0 12px; }
+
+    textarea, select {
+      width:100%;
+      background:#0f3240;
+      border:none;
+      border-radius:10px;
+      color:var(--text);
+      padding:10px;
+      font-family:monospace;
+      margin-top:8px;
+      box-sizing:border-box;
+    }
+    textarea { min-height:88px; }
+
+    .step { margin-top:16px; border-top:1px solid rgba(255,255,255,.1); padding-top:12px; }
+    .step-title { cursor:pointer; color:var(--muted); user-select:none; }
+    .step-title:hover { color:var(--accent-hover); }
+    .step-title.disabled { opacity:.55; pointer-events:none; }
+
+    .content {
+      display:none;
+      margin-top:8px;
+      font-family:monospace;
+      font-size:13px;
+      white-space:pre-wrap;
+      word-break:break-all;
+    }
+    .content.show { display:block; animation:fadeIn .25s ease; }
+    @keyframes fadeIn { from{opacity:0; transform:translateY(-4px)} to{opacity:1} }
+
+    .hint { font-size:12px; color:var(--muted); }
+
+    .banner {
+      margin:10px 0 12px;
+      padding:10px;
+      border-radius:12px;
+      font-size:12px;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(255,255,255,.06);
+      color:var(--text);
+    }
+    .banner.warn {
+      background:rgba(255,107,107,.12);
+      border-color:rgba(255,107,107,.25);
+      color:#ffd1d1;
+    }
+
+    .statusLine { font-size:12px; color:var(--muted); white-space:pre-wrap; }
+    .statusLine.ok { color:var(--ok); }
+    .statusLine.err { color:var(--danger); }
+    .bar { height:8px; border-radius:999px; background:rgba(255,255,255,.12); overflow:hidden; margin-top:6px; }
+    .bar > div { height:100%; width:0%; background:rgba(242,166,90,.9); transition:width .2s ease; }
+
+    .smallBtn {
+      margin-top:10px;
+      border:none;
+      background:rgba(255,255,255,.08);
+      color:var(--text);
+      padding:8px 10px;
+      border-radius:10px;
+      cursor:pointer;
+      font-size:12px;
+    }
+    .smallBtn:hover { background:rgba(255,255,255,.12); }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <h2>Mnemonic → Wallet Tree</h2>
+
+    <div class="banner warn">
+      This is a <b>SIMULATION</b>. It follows the same “shape” (seed → master → derived),
+      but it does <b>NOT</b> generate valid Bitcoin private keys/addresses.
+    </div>
+
+    <div class="statusLine" id="status">Checking Web Crypto support…</div>
+    <div class="bar"><div id="progress"></div></div>
+
+    <div class="step">
+      <div class="step-title">① Paste 24-word mnemonic</div>
+      <textarea id="mnemonicInput" placeholder="paste mnemonic here…"></textarea>
+      <div class="hint">Any spaces/newlines are OK (simulation does not validate against the BIP39 wordlist).</div>
+    </div>
+
+    <div class="step">
+      <div id="step2" class="step-title disabled" onclick="showSeed()">② Seed (512 bits)</div>
+      <div class="content" id="seedOut"></div>
+      <div class="hint">PBKDF2-HMAC-SHA-512 · 2048 rounds (real PBKDF2 via Web Crypto)</div>
+    </div>
+
+    <div class="step">
+      <div id="step3" class="step-title disabled" onclick="showMaster()">③ Master key (root-like)</div>
+      <div class="content" id="masterOut"></div>
+      <div class="hint">HMAC-SHA-512("Bitcoin seed", seed) → (IL, IR) style output</div>
+    </div>
+
+    <div class="step">
+      <div class="step-title">④ Choose derivation path</div>
+      <select id="pathSelect">
+        <option value="m/84'/0'/0'/0">BIP-84 · Native SegWit (bc1)</option>
+        <option value="m/49'/0'/0'/0">BIP-49 · Nested SegWit</option>
+        <option value="m/44'/0'/0'/0">BIP-44 · Legacy</option>
+      </select>
+      <div class="hint">Used only as a deterministic label in the simulation.</div>
+    </div>
+
+    <div class="step">
+      <div id="step5" class="step-title disabled" onclick="showAddresses()">⑤ Derived addresses (SIMULATED)</div>
+      <div class="content" id="addrOut"></div>
+    </div>
+
+    <button class="smallBtn" onclick="resetAll()">Reset</button>
+  </div>
+
+<script>
+/* -------------------- STATE -------------------- */
+let seedBytes = null;          // 64 bytes
+let masterKey = null;          // 32 bytes (simulated “master private key”)
+let masterChain = null;        // 32 bytes (simulated “chain code”)
+
+/* -------------------- UI HELPERS -------------------- */
+const statusEl = document.getElementById('status');
+const progEl = document.getElementById('progress');
+const step2El = document.getElementById('step2');
+const step3El = document.getElementById('step3');
+const step5El = document.getElementById('step5');
+
+function setStatus(msg, kind) {
+  statusEl.textContent = msg;
+  statusEl.className = 'statusLine' + (kind ? (' ' + kind) : '');
+}
+function setProg(pct) {
+  progEl.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+function enableSteps() {
+  step2El.classList.remove('disabled');
+  step3El.classList.remove('disabled');
+  step5El.classList.remove('disabled');
+}
+function show(elId, text) {
+  const el = document.getElementById(elId);
+  el.textContent = text;
+  el.classList.add('show');
+}
+function clearShow(elId) {
+  const el = document.getElementById(elId);
+  el.textContent = '';
+  el.classList.remove('show');
+}
+
+function normalizeMnemonic(s) {
+  return (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function bytesToHex(buf) {
+  const b = (buf instanceof ArrayBuffer) ? new Uint8Array(buf) : new Uint8Array(buf.buffer || buf);
+  return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function utf8(s) {
+  return new TextEncoder().encode(s);
+}
+
+/* -------------------- CRYPTO (WEB CRYPTO) -------------------- */
+async function pbkdf2Sha512(passwordBytes, saltBytes, iterations, lengthBytes) {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    passwordBytes,
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-512',
+      salt: saltBytes,
+      iterations
+    },
+    keyMaterial,
+    lengthBytes * 8
+  );
+
+  return new Uint8Array(bits);
+}
+
+async function hmacSha512(keyBytes, msgBytes) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'HMAC', hash: 'SHA-512' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, msgBytes);
+  return new Uint8Array(sig); // 64 bytes
+}
+
+async function sha256(bytes) {
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return new Uint8Array(hash);
+}
+
+/* -------------------- BOOT -------------------- */
+(function boot() {
+  setProg(10);
+  if (!window.crypto || !crypto.subtle) {
+    setProg(100);
+    setStatus('Web Crypto not available in this environment.\nTry running in a modern Chrome window.', 'err');
+    return;
+  }
+  setProg(100);
+  setStatus('Ready. Paste mnemonic and click step ②.', 'ok');
+  enableSteps();
+})();
+
+/* -------------------- STEP 2: SEED (REAL PBKDF2) -------------------- */
+async function showSeed() {
+  try {
+    const m = normalizeMnemonic(document.getElementById('mnemonicInput').value);
+    if (!m) { alert('Paste a mnemonic first.'); return; }
+
+    setStatus('Deriving seed… (PBKDF2 2048 rounds)', '');
+    setProg(30);
+
+    // SIMULATION NOTE:
+    // Real BIP39 uses: PBKDF2(password="mnemonic"+passphrase, salt="mnemonic"+passphrase)
+    // Here we do a simple close analog: password=mnemonic text, salt="mnemonic" (no passphrase UI).
+    const password = utf8(m);
+    const salt = utf8('mnemonic');
+    seedBytes = await pbkdf2Sha512(password, salt, 2048, 64);
+
+    setProg(70);
+    show('seedOut', bytesToHex(seedBytes));
+    clearShow('masterOut');
+    clearShow('addrOut');
+    masterKey = null;
+    masterChain = null;
+
+    setProg(100);
+    setStatus('Seed derived. Click step ③.', 'ok');
+  } catch (e) {
+    setProg(100);
+    setStatus('Error deriving seed:\n' + (e?.stack || e?.message || String(e)), 'err');
+  }
+}
+
+/* -------------------- STEP 3: MASTER (HMAC-SHA-512, BIP32-SHAPED) -------------------- */
+async function showMaster() {
+  try {
+    if (!seedBytes) { alert('First click ② to derive the seed.'); return; }
+
+    setStatus('Computing master key material… (HMAC-SHA-512)', '');
+    setProg(35);
+
+    // This mirrors the “Bitcoin seed” HMAC step used in BIP32 root generation.
+    const I = await hmacSha512(utf8('Bitcoin seed'), seedBytes);
+    const IL = I.slice(0, 32);  // “master private key-ish”
+    const IR = I.slice(32);     // “chain code-ish”
+
+    masterKey = IL;
+    masterChain = IR;
+
+    setProg(85);
+    show('masterOut',
+      'SIMULATED root material (BIP32-shaped)\n\n' +
+      'Master key (32 bytes):\n' + bytesToHex(masterKey) + '\n\n' +
+      'Chain code (32 bytes):\n' + bytesToHex(masterChain)
+    );
+
+    setProg(100);
+    setStatus('Master material ready. Click step ⑤ to derive simulated addresses.', 'ok');
+  } catch (e) {
+    setProg(100);
+    setStatus('Error computing master:\n' + (e?.stack || e?.message || String(e)), 'err');
+  }
+}
+
+/* -------------------- STEP 5: SIMULATED DERIVATION -------------------- */
+async function showAddresses() {
+  try {
+    if (!masterKey || !masterChain) { alert('First click ③.'); return; }
+
+    const path = document.getElementById('pathSelect').value;
+
+    setStatus('Deriving 5 simulated children…', '');
+    setProg(30);
+
+    const out = [];
+    for (let i = 0; i < 5; i++) {
+      // Simulate child key material deterministically
+      // childKey = SHA256(masterKey || masterChain || path || index)
+      const msg = new Uint8Array([
+        ...masterKey,
+        ...masterChain,
+        ...utf8(path),
+        ...utf8('/' + i)
+      ]);
+
+      const childKey = await sha256(msg);                 // 32 bytes
+      const childPubLike = await sha256(childKey);        // 32 bytes (fake “pubkey”)
+      const addrLike = await sha256(childPubLike);        // 32 bytes (fake “address bytes”)
+
+      // Make it look like different address “styles”
+      let prefix = 'sim1';
+      if (path.startsWith('m/44')) prefix = 'simL';
+      if (path.startsWith('m/49')) prefix = 'simN';
+      if (path.startsWith('m/84')) prefix = 'simW';
+
+      // Create a short “address” string
+      const addrHex = bytesToHex(addrLike).slice(0, 40);
+      const address = `${prefix}_${addrHex}`;
+
+      out.push(
+        `Path: ${path}/${i}\n` +
+        `Private key (SIM): ${bytesToHex(childKey)}\n` +
+        `Public key (SIM):  ${bytesToHex(childPubLike)}\n` +
+        `Address (SIM):     ${address}\n`
+      );
+
+      setProg(30 + Math.round(((i + 1) / 5) * 60));
+    }
+
+    show('addrOut',
+      out.join('\n') +
+      '\n\nNOTE: These are SIMULATED outputs for UI/demo purposes. They are NOT valid Bitcoin keys/addresses.'
+    );
+
+    setProg(100);
+    setStatus('Done (simulation).', 'ok');
+  } catch (e) {
+    setProg(100);
+    setStatus('Error deriving simulated addresses:\n' + (e?.stack || e?.message || String(e)), 'err');
+  }
+}
+
+function resetAll() {
+  seedBytes = null;
+  masterKey = null;
+  masterChain = null;
+  document.getElementById('mnemonicInput').value = '';
+  clearShow('seedOut');
+  clearShow('masterOut');
+  clearShow('addrOut');
+  setProg(100);
+  setStatus('Ready. Paste mnemonic and click step ②.', 'ok');
+}
+
+/* Expose for inline onclick */
+window.showSeed = showSeed;
+window.showMaster = showMaster;
+window.showAddresses = showAddresses;
+window.resetAll = resetAll;
+</script>
+</body>
+</html>
