@@ -1,1 +1,1 @@
-This page simulates how a bitcoin wallet generates multiple wallet addresses from a 24 words seed phrase or mnemonic words, it is not an actual wallet address however, it is for educational purpose only.
+This page simulates how a bitcoin wallet generates multiple wallet addresses from a 24 words seed phrase or mnemonic words, it is not an actual wallet address however, it is for educational purpose only. Do not enter your actual bitcoin seed phrase here.
