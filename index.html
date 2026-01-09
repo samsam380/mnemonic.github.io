@@ -3,7 +3,7 @@
 <head>
   <base target="_top">
   <meta charset="utf-8" />
-  <title>Mnemonic → Wallet Tree (Simulation)</title>
+  <title>Mnemonic → Wallet Tree (REAL)</title>
 
   <style>
     :root {
@@ -32,7 +32,7 @@
     }
     h2 { text-align:center; margin:0 0 12px; }
 
-    textarea, select {
+    textarea, select, input {
       width:100%;
       background:#0f3240;
       border:none;
@@ -95,6 +95,12 @@
       font-size:12px;
     }
     .smallBtn:hover { background:rgba(255,255,255,.12); }
+
+    .row { display:flex; gap:10px; align-items:center; }
+    .row > * { flex:1; }
+    .checkboxRow { display:flex; gap:10px; align-items:center; margin-top:10px; }
+    .checkboxRow label { font-size:12px; color:var(--muted); display:flex; gap:8px; align-items:center; }
+    .checkboxRow input { width:auto; margin:0; }
   </style>
 </head>
 
@@ -103,54 +109,70 @@
     <h2>Mnemonic → Wallet Tree</h2>
 
     <div class="banner warn">
-      This is a <b>SIMULATION</b>. It follows the same “shape” (seed → master → derived),
-      but it does <b>NOT</b> generate valid Bitcoin private keys/addresses.
+      This generates <b>REAL</b> keys/addresses (BIP39/BIP32/BIP44/49/84).<br/>
+      Use only with mnemonics you own. Prefer running offline if you paste real funds mnemonics.
     </div>
 
-    <div class="statusLine" id="status">Checking Web Crypto support…</div>
+    <div class="statusLine" id="status">Loading crypto libs…</div>
     <div class="bar"><div id="progress"></div></div>
 
     <div class="step">
       <div class="step-title">① Paste 24-word mnemonic</div>
       <textarea id="mnemonicInput" placeholder="paste mnemonic here…"></textarea>
-      <div class="hint">Any spaces/newlines are OK (simulation does not validate against the BIP39 wordlist).</div>
+      <div class="row">
+        <input id="passphraseInput" placeholder="optional BIP39 passphrase (aka 25th word) …" />
+      </div>
+      <div class="hint">Mnemonic is validated against the official BIP39 English wordlist.</div>
     </div>
 
     <div class="step">
       <div id="step2" class="step-title disabled" onclick="showSeed()">② Seed (512 bits)</div>
       <div class="content" id="seedOut"></div>
-      <div class="hint">PBKDF2-HMAC-SHA-512 · 2048 rounds (real PBKDF2 via Web Crypto)</div>
+      <div class="hint">BIP39 PBKDF2-HMAC-SHA512 · 2048 rounds · salt = "mnemonic"+passphrase</div>
     </div>
 
     <div class="step">
-      <div id="step3" class="step-title disabled" onclick="showMaster()">③ Master key (root-like)</div>
+      <div id="step3" class="step-title disabled" onclick="showMaster()">③ Master key (BIP32)</div>
       <div class="content" id="masterOut"></div>
-      <div class="hint">HMAC-SHA-512("Bitcoin seed", seed) → (IL, IR) style output</div>
+      <div class="hint">BIP32 root: xprv/xpub, chain code, master pubkey</div>
     </div>
 
     <div class="step">
       <div class="step-title">④ Choose derivation path</div>
       <select id="pathSelect">
         <option value="m/84'/0'/0'/0">BIP-84 · Native SegWit (bc1)</option>
-        <option value="m/49'/0'/0'/0">BIP-49 · Nested SegWit</option>
-        <option value="m/44'/0'/0'/0">BIP-44 · Legacy</option>
+        <option value="m/49'/0'/0'/0">BIP-49 · Nested SegWit (3...)</option>
+        <option value="m/44'/0'/0'/0">BIP-44 · Legacy (1...)</option>
       </select>
-      <div class="hint">Used only as a deterministic label in the simulation.</div>
+
+      <div class="checkboxRow">
+        <label><input type="checkbox" id="showPriv" /> show private keys (dangerous)</label>
+      </div>
+
+      <div class="hint">Children derived as path + "/i" for i=0..4</div>
     </div>
 
     <div class="step">
-      <div id="step5" class="step-title disabled" onclick="showAddresses()">⑤ Derived addresses (SIMULATED)</div>
+      <div id="step5" class="step-title disabled" onclick="showAddresses()">⑤ Derived addresses (REAL)</div>
       <div class="content" id="addrOut"></div>
     </div>
 
     <button class="smallBtn" onclick="resetAll()">Reset</button>
   </div>
 
-<script>
+<script type="module">
+/* -------------------- IMPORTS (ESM CDN) -------------------- */
+import { mnemonicToSeedSync, validateMnemonic } from "https://esm.sh/@scure/bip39@1.4.0";
+import { wordlist as english } from "https://esm.sh/@scure/bip39@1.4.0/wordlists/english";
+import { HDKey } from "https://esm.sh/@scure/bip32@1.6.0";
+import { sha256 } from "https://esm.sh/@noble/hashes@1.4.0/sha256";
+import { ripemd160 } from "https://esm.sh/@noble/hashes@1.4.0/ripemd160";
+import { base58check } from "https://esm.sh/@scure/base@1.1.7";
+import { bech32 } from "https://esm.sh/@scure/base@1.1.7";
+
 /* -------------------- STATE -------------------- */
 let seedBytes = null;          // 64 bytes
-let masterKey = null;          // 32 bytes (simulated “master private key”)
-let masterChain = null;        // 32 bytes (simulated “chain code”)
+let root = null;               // HDKey (BIP32 root)
 
 /* -------------------- UI HELPERS -------------------- */
 const statusEl = document.getElementById('status');
@@ -185,90 +207,89 @@ function clearShow(elId) {
 function normalizeMnemonic(s) {
   return (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
-function bytesToHex(buf) {
-  const b = (buf instanceof ArrayBuffer) ? new Uint8Array(buf) : new Uint8Array(buf.buffer || buf);
+function bytesToHex(b) {
   return Array.from(b).map(x => x.toString(16).padStart(2, '0')).join('');
 }
-function utf8(s) {
-  return new TextEncoder().encode(s);
+function concatBytes(...arrs) {
+  const len = arrs.reduce((sum, a) => sum + a.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  return out;
 }
 
-/* -------------------- CRYPTO (WEB CRYPTO) -------------------- */
-async function pbkdf2Sha512(passwordBytes, saltBytes, iterations, lengthBytes) {
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    passwordBytes,
-    'PBKDF2',
-    false,
-    ['deriveBits']
-  );
-
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: 'PBKDF2',
-      hash: 'SHA-512',
-      salt: saltBytes,
-      iterations
-    },
-    keyMaterial,
-    lengthBytes * 8
-  );
-
-  return new Uint8Array(bits);
+/* -------------------- BITCOIN UTILS -------------------- */
+function hash160(pubkeyBytes) {
+  return ripemd160(sha256(pubkeyBytes));
 }
 
-async function hmacSha512(keyBytes, msgBytes) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-512' },
-    false,
-    ['sign']
-  );
-  const sig = await crypto.subtle.sign('HMAC', key, msgBytes);
-  return new Uint8Array(sig); // 64 bytes
+function p2pkhAddress(pubkeyBytes) {
+  // version 0x00 for mainnet
+  const h160 = hash160(pubkeyBytes);
+  const payload = concatBytes(new Uint8Array([0x00]), h160);
+  return base58check.encode(payload);
 }
 
-async function sha256(bytes) {
-  const hash = await crypto.subtle.digest('SHA-256', bytes);
-  return new Uint8Array(hash);
+function p2shP2wpkhAddress(pubkeyBytes) {
+  // redeemScript = 0x00 0x14 <hash160(pubkey)>
+  const h160 = hash160(pubkeyBytes);
+  const redeem = concatBytes(new Uint8Array([0x00, 0x14]), h160);
+  const redeemHash = ripemd160(sha256(redeem));
+  // version 0x05 for mainnet P2SH
+  const payload = concatBytes(new Uint8Array([0x05]), redeemHash);
+  return base58check.encode(payload);
+}
+
+function p2wpkhBech32Address(pubkeyBytes) {
+  const h160 = hash160(pubkeyBytes);
+  // bech32 witness v0 => words = [0] + convertbits(program 8->5)
+  const words = bech32.toWords(h160);
+  words.unshift(0); // witness version 0
+  return bech32.encode("bc", words);
+}
+
+function addressForPath(path, pubkeyBytes) {
+  if (path.startsWith("m/84'")) return p2wpkhBech32Address(pubkeyBytes);
+  if (path.startsWith("m/49'")) return p2shP2wpkhAddress(pubkeyBytes);
+  return p2pkhAddress(pubkeyBytes); // m/44'
 }
 
 /* -------------------- BOOT -------------------- */
 (function boot() {
-  setProg(10);
-  if (!window.crypto || !crypto.subtle) {
-    setProg(100);
-    setStatus('Web Crypto not available in this environment.\nTry running in a modern Chrome window.', 'err');
-    return;
-  }
   setProg(100);
   setStatus('Ready. Paste mnemonic and click step ②.', 'ok');
   enableSteps();
 })();
 
-/* -------------------- STEP 2: SEED (REAL PBKDF2) -------------------- */
+/* -------------------- STEP 2: SEED (REAL BIP39) -------------------- */
 async function showSeed() {
   try {
     const m = normalizeMnemonic(document.getElementById('mnemonicInput').value);
+    const passphrase = (document.getElementById('passphraseInput').value || '');
+
     if (!m) { alert('Paste a mnemonic first.'); return; }
 
-    setStatus('Deriving seed… (PBKDF2 2048 rounds)', '');
-    setProg(30);
+    setStatus('Validating mnemonic…', '');
+    setProg(20);
 
-    // SIMULATION NOTE:
-    // Real BIP39 uses: PBKDF2(password="mnemonic"+passphrase, salt="mnemonic"+passphrase)
-    // Here we do a simple close analog: password=mnemonic text, salt="mnemonic" (no passphrase UI).
-    const password = utf8(m);
-    const salt = utf8('mnemonic');
-    seedBytes = await pbkdf2Sha512(password, salt, 2048, 64);
+    if (!validateMnemonic(m, english)) {
+      setProg(100);
+      setStatus('Invalid mnemonic (fails BIP39 wordlist/checksum).', 'err');
+      alert('Invalid mnemonic (fails BIP39 validation). Check spelling and word count.');
+      return;
+    }
 
-    setProg(70);
+    setStatus('Deriving seed… (BIP39 PBKDF2 2048 rounds)', '');
+    setProg(45);
+
+    // Real BIP39 seed derivation
+    seedBytes = mnemonicToSeedSync(m, passphrase); // Uint8Array(64)
+
+    setProg(80);
     show('seedOut', bytesToHex(seedBytes));
     clearShow('masterOut');
     clearShow('addrOut');
-    masterKey = null;
-    masterChain = null;
+    root = null;
 
     setProg(100);
     setStatus('Seed derived. Click step ③.', 'ok');
@@ -278,77 +299,61 @@ async function showSeed() {
   }
 }
 
-/* -------------------- STEP 3: MASTER (HMAC-SHA-512, BIP32-SHAPED) -------------------- */
+/* -------------------- STEP 3: MASTER (REAL BIP32) -------------------- */
 async function showMaster() {
   try {
     if (!seedBytes) { alert('First click ② to derive the seed.'); return; }
 
-    setStatus('Computing master key material… (HMAC-SHA-512)', '');
+    setStatus('Computing BIP32 root…', '');
     setProg(35);
 
-    // This mirrors the “Bitcoin seed” HMAC step used in BIP32 root generation.
-    const I = await hmacSha512(utf8('Bitcoin seed'), seedBytes);
-    const IL = I.slice(0, 32);  // “master private key-ish”
-    const IR = I.slice(32);     // “chain code-ish”
-
-    masterKey = IL;
-    masterChain = IR;
+    root = HDKey.fromMasterSeed(seedBytes);
 
     setProg(85);
-    show('masterOut',
-      'SIMULATED root material (BIP32-shaped)\n\n' +
-      'Master key (32 bytes):\n' + bytesToHex(masterKey) + '\n\n' +
-      'Chain code (32 bytes):\n' + bytesToHex(masterChain)
-    );
+
+    const info =
+      'BIP32 root (mainnet)\n\n' +
+      'xprv:\n' + (root.privateExtendedKey || '(no xprv)') + '\n\n' +
+      'xpub:\n' + (root.publicExtendedKey || '(no xpub)') + '\n\n' +
+      'Master private key (hex):\n' + (root.privateKey ? bytesToHex(root.privateKey) : '(none)') + '\n\n' +
+      'Chain code (hex):\n' + (root.chainCode ? bytesToHex(root.chainCode) : '(none)') + '\n\n' +
+      'Master public key (compressed hex):\n' + (root.publicKey ? bytesToHex(root.publicKey) : '(none)');
+
+    show('masterOut', info);
 
     setProg(100);
-    setStatus('Master material ready. Click step ⑤ to derive simulated addresses.', 'ok');
+    setStatus('Master ready. Click step ⑤ to derive addresses.', 'ok');
   } catch (e) {
     setProg(100);
     setStatus('Error computing master:\n' + (e?.stack || e?.message || String(e)), 'err');
   }
 }
 
-/* -------------------- STEP 5: SIMULATED DERIVATION -------------------- */
+/* -------------------- STEP 5: REAL DERIVATION + REAL ADDRESSES -------------------- */
 async function showAddresses() {
   try {
-    if (!masterKey || !masterChain) { alert('First click ③.'); return; }
+    if (!root) { alert('First click ③.'); return; }
 
-    const path = document.getElementById('pathSelect').value;
+    const basePath = document.getElementById('pathSelect').value;
+    const showPriv = document.getElementById('showPriv').checked;
 
-    setStatus('Deriving 5 simulated children…', '');
+    setStatus('Deriving 5 children + encoding addresses…', '');
     setProg(30);
 
     const out = [];
     for (let i = 0; i < 5; i++) {
-      // Simulate child key material deterministically
-      // childKey = SHA256(masterKey || masterChain || path || index)
-      const msg = new Uint8Array([
-        ...masterKey,
-        ...masterChain,
-        ...utf8(path),
-        ...utf8('/' + i)
-      ]);
+      const fullPath = `${basePath}/${i}`; // derive children under change=0
+      const child = root.derive(fullPath);
 
-      const childKey = await sha256(msg);                 // 32 bytes
-      const childPubLike = await sha256(childKey);        // 32 bytes (fake “pubkey”)
-      const addrLike = await sha256(childPubLike);        // 32 bytes (fake “address bytes”)
+      if (!child.publicKey) throw new Error('Derived key missing publicKey at ' + fullPath);
 
-      // Make it look like different address “styles”
-      let prefix = 'sim1';
-      if (path.startsWith('m/44')) prefix = 'simL';
-      if (path.startsWith('m/49')) prefix = 'simN';
-      if (path.startsWith('m/84')) prefix = 'simW';
-
-      // Create a short “address” string
-      const addrHex = bytesToHex(addrLike).slice(0, 40);
-      const address = `${prefix}_${addrHex}`;
+      const addr = addressForPath(basePath, child.publicKey);
 
       out.push(
-        `Path: ${path}/${i}\n` +
-        `Private key (SIM): ${bytesToHex(childKey)}\n` +
-        `Public key (SIM):  ${bytesToHex(childPubLike)}\n` +
-        `Address (SIM):     ${address}\n`
+        `Path: ${fullPath}\n` +
+        (showPriv ? `Private key (hex): ${child.privateKey ? bytesToHex(child.privateKey) : '(none)'}\n` : '') +
+        `Public key (compressed hex): ${bytesToHex(child.publicKey)}\n` +
+        `Address: ${addr}\n`
       );
 
       setProg(30 + Math.round(((i + 1) / 5) * 60));
@@ -356,22 +361,24 @@ async function showAddresses() {
 
     show('addrOut',
       out.join('\n') +
-      '\n\nNOTE: These are SIMULATED outputs for UI/demo purposes. They are NOT valid Bitcoin keys/addresses.'
+      '\n\nNOTE: These are REAL derived outputs. Treat mnemonics/private keys as extremely sensitive.'
     );
 
     setProg(100);
-    setStatus('Done (simulation).', 'ok');
+    setStatus('Done (real derivation).', 'ok');
   } catch (e) {
     setProg(100);
-    setStatus('Error deriving simulated addresses:\n' + (e?.stack || e?.message || String(e)), 'err');
+    setStatus('Error deriving addresses:\n' + (e?.stack || e?.message || String(e)), 'err');
   }
 }
 
+/* -------------------- RESET -------------------- */
 function resetAll() {
   seedBytes = null;
-  masterKey = null;
-  masterChain = null;
+  root = null;
   document.getElementById('mnemonicInput').value = '';
+  document.getElementById('passphraseInput').value = '';
+  document.getElementById('showPriv').checked = false;
   clearShow('seedOut');
   clearShow('masterOut');
   clearShow('addrOut');
